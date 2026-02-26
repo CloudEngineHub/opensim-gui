@@ -66,6 +66,7 @@ import org.opensim.threejs.ModelVisualizationJson;
 import org.opensim.utils.ErrorDialog;
 import org.opensim.utils.TheApp;
 import org.opensim.view.*;
+import org.opensim.view.motions.MotionControlJPanel;
 
 
 /**
@@ -92,15 +93,15 @@ public final class ViewDB extends Observable implements Observer, LookupListener
         JSONObject msg = new JSONObject();
         msg.put("Op", "endAnimation");
         websocketdb.broadcastMessageJson(msg, null);
-        
+        System.out.println("Sending endAnimation message");        
     }
-
-    public void startAnimation() {
+    
+    public void clearCurrentAnimation() {
         JSONObject msg = new JSONObject();
-        msg.put("Op", "startAnimation");
-        websocketdb.broadcastMessageJson(msg, null);
+        msg.put("Op", "ClearCurrentAnimation");
+        websocketdb.broadcastMessageJson(msg, null);       
     }
-
+    
     public void updateComponentVisuals(Model model, Component mc, Boolean frame) {
         if (websocketdb!=null){
             ModelVisualizationJson modelJson = getModelVisualizationJson(model);
@@ -131,10 +132,11 @@ public final class ViewDB extends Observable implements Observer, LookupListener
 
     }
 
-    public int getFrameTime() {
+    public int getFrameRate() {
         String saved = TheApp.getCurrentVersionPreferences().get("Internal.FrameRate", String.valueOf(frameRate));
         if (saved!= null)
             frameRate = Integer.parseInt(saved);
+        System.out.println("Setting frame rate to "+frameRate+" in ViewDB.getFrameRate");
         TheApp.getCurrentVersionPreferences().put("Internal.FrameRate", String.valueOf(frameRate));
         return frameRate; // 30 FPS default
     }
@@ -178,6 +180,20 @@ public final class ViewDB extends Observable implements Observer, LookupListener
 
     public void broadcastVisulaizerMessage(JSONObject json) {
         websocketdb.broadcastMessageJson(json, null);
+    }
+
+    public void sendAnimationCommand(String setCurrentAnimation, double startTime, double endTime) {
+        JSONObject topMsg = new JSONObject();
+        topMsg.put("Op", setCurrentAnimation);
+        topMsg.put("Start", startTime);
+        topMsg.put("End", endTime);
+        websocketdb.broadcastMessageJson(topMsg, null);
+    }
+
+    public void sendClearAnimationCommand() {
+        JSONObject topMsg = new JSONObject();
+        topMsg.put("Op", "ClearCurrentAnimation");
+        websocketdb.broadcastMessageJson(topMsg, null);
     }
   
    class AppearanceChange {
@@ -1248,11 +1264,6 @@ public final class ViewDB extends Observable implements Observer, LookupListener
            repaintAll();        
     }
 
-
-    public static boolean isVtkGraphicsAvailable() {
-        return false;
-    }
-
     public static void printBounds(String name, double[] bodyBounds) {
         System.out.print("Bounds for "+name+" are:[");
         for(int i=0; i<6; i++)
@@ -1354,12 +1365,11 @@ public final class ViewDB extends Observable implements Observer, LookupListener
         String msgType = (String)jsonObject.get("type");
         if (msgType != null) {
             if (msgType.equalsIgnoreCase("info")) {
-                if (jsonObject.get("renderTime")!=null){
-                    double frameRenderTimeInMillis = JSONMessageHandler.convertObjectFromJsonToDouble(jsonObject.get("renderTime"));
-                    //System.out.println("renderTime"+frameRenderTimeInMillis);
-                    int frameRate = (int) (frameRenderTimeInMillis*1.5);
-                    if (frameRate > 30)
-                        TheApp.getCurrentVersionPreferences().put("Internal.FrameRate", String.valueOf(frameRate));
+                if (jsonObject.get("fps")!=null){
+                    int frameRate = (int) JSONMessageHandler.convertObjectFromJsonToDouble(jsonObject.get("fps"));
+                    //System.out.println("FPS by viewer reported as:"+frameRate);
+                    if (debugLevel > 1) System.out.println("Setting frame rate to "+frameRate+" in ViewDB.handleJson fps");
+                    TheApp.getCurrentVersionPreferences().put("Internal.FrameRate", String.valueOf(frameRate));
                     return;
                 }
                 if (debugLevel > 1) {
@@ -1400,6 +1410,37 @@ public final class ViewDB extends Observable implements Observer, LookupListener
                 WebSocketDB.getInstance().finishPendingMessage((String) jsonObject.get("uuid"));
                 return;
             }
+            if (msgType.equalsIgnoreCase("frameack")){
+                if (debugLevel > 1) System.out.println("Ack frame #"+jsonObject.get("#"));
+                return;
+            }
+            if (msgType.equalsIgnoreCase("FinishRecording")){
+                MotionControlJPanel.getInstance().setViewerDrivenPlay(false);
+                if (debugLevel > 1) System.out.println("AEnd recording.");
+                return;
+            }
+            if (msgType.equalsIgnoreCase("Animation")){
+                String op = (String) jsonObject.get("OP");
+                if (op.equalsIgnoreCase("start")){
+                    double timestep = (double) jsonObject.get("timestep");
+                    int desiredFrameRate = (int) Math.ceil(1000.0/timestep);
+                    TheApp.getCurrentVersionPreferences().put("Internal.FrameRate", String.valueOf(desiredFrameRate));
+                    if (debugLevel >1)
+                        OpenSimLogger.logMessage("Setting desired frame rate to:"+desiredFrameRate+" FPS", OpenSimLogger.INFO);
+                    MotionControlJPanel.getInstance().playAnimation();
+                }
+                if (op.equalsIgnoreCase("setTime")){
+                    Object valueObj = jsonObject.get("value");
+                    double animationTime = 0.0;
+                    if (valueObj instanceof Double)
+                        animationTime = (double) jsonObject.get("value");
+                    else if (valueObj instanceof Long)
+                        animationTime = (long) jsonObject.get("value");
+                    //OpenSimLogger.logMessage("Setting current time from viewer to:"+String.valueOf(animationTime), OpenSimLogger.INFO);
+                    MotionControlJPanel.getInstance().setTimeNoRender(animationTime);
+                }
+                return;
+            }
         }
        Object uuid = jsonObject.get("uuid");
        String uuidString = (String) uuid;
@@ -1420,5 +1461,33 @@ public final class ViewDB extends Observable implements Observer, LookupListener
     }
     public void broadcastVisualizerMessage(JSONObject json){
         websocketdb.broadcastMessageJson(json, null);
+    }
+    
+    public void sendCurrentAnimations(JSONObject animationJson) {
+        if (debugLevel >1)
+            OpenSimLogger.logMessage("Sending AnimationClips to Viewer", OpenSimLogger.INFO);
+        websocketdb.broadcastMessageJson(animationJson, null);
+    }
+    
+    public void sendAnimationClip(JSONObject animationJson) {
+        if (debugLevel >1)
+            OpenSimLogger.logMessage("Sending AnimationClip to Viewer", OpenSimLogger.INFO);
+        websocketdb.broadcastMessageJson(animationJson, null);
+    }
+    
+    public void playCurrentAnimations(double startTime, JSONArray uuids) {
+        if (debugLevel >1)
+            OpenSimLogger.logMessage("Play AnimationClips in Viewer", OpenSimLogger.INFO);
+        JSONObject currentAnimation = new JSONObject();
+        currentAnimation.put("Op", "PlayAnimation");
+        currentAnimation.put("start_time", startTime);
+        currentAnimation.put("speed", MotionControlJPanel.getInstance().getSpeed());
+        currentAnimation.put("loop", MotionControlJPanel.getInstance().getMasterMotion().isWrapMotion());        
+        currentAnimation.put("reverse", MotionControlJPanel.getInstance().isReverse());
+        // Send start time and directiion as users may play from middle either direction
+        currentAnimation.put("UUIDs", uuids);
+        // Could make this more robust by keeping track of uuid but as of now
+        // there's at most one animation in the viewer.
+        websocketdb.broadcastMessageJson(currentAnimation, null);
     }
 }
